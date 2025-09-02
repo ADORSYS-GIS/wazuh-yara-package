@@ -85,18 +85,20 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          SYFT_VERSION="v1.7.0"
-          mkdir -p "$HOME/.local/bin"
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "$HOME/.local/bin" "$SYFT_VERSION"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          SYFT_VERSION="v1.32.0"
+          BIN="$HOME/.local/bin"
+          mkdir -p "$BIN"
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "$BIN" "$SYFT_VERSION"
+          echo "$BIN" >> "$GITHUB_PATH"
+          export PATH="$BIN:$PATH"
           syft version
-
+      
       # ---------- Build ----------
       - name: Bootstrap
         run: |
           set -euxo pipefail
           ./bootstrap.sh || autoreconf -fi
-          
+
       - name: Configure
         run: |
           set -euxo pipefail

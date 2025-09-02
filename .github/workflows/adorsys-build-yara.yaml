@@ -78,8 +78,19 @@ jobs:
             echo "CPPFLAGS=-I${OPENSSL_PREFIX}/include -I${LIBMAGIC_PREFIX}/include -I${PCRE2_PREFIX}/include ${CPPFLAGS}"
             echo "LDFLAGS=-L${OPENSSL_PREFIX}/lib -L${LIBMAGIC_PREFIX}/lib -L${PCRE2_PREFIX}/lib ${LDFLAGS}"
           } >> "$GITHUB_ENV"
-      
-      
+
+      # ---------- SBOM tooling (Syft) ----------
+      # Pin the Syft version for reproducibility; adjust as you like.
+      - name: Install Syft (SBOM generator)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SYFT_VERSION="v1.7.0"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "$HOME/.local/bin" "$SYFT_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          syft version
+
       # ---------- Build ----------
       - name: Bootstrap
         run: |
@@ -97,17 +108,17 @@ jobs:
           CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu || echo 2)"
           make -j"$CORES"
 
-      # ---------- Package ----------
-      - name: Package binaries
+      # ---------- Package + SBOM + checksums ----------
+      - name: Package binaries + SBOMs
         id: pkg
         run: |
           set -euxo pipefail
 
           # Derive a nice version string
           if git describe --tags --dirty --always >/dev/null 2>&1; then
-            VER="$(git describe --tags --dirty --always)-adorsys"
+            VER="$(git describe --tags --dirty --always)"
           else
-            VER="${GITHUB_REF_NAME:-dev}-adorsys"
+            VER="${GITHUB_REF_NAME:-dev}"
           fi
 
           OS="${{ matrix.os_name }}"
@@ -132,20 +143,55 @@ jobs:
             echo "ref=${{ github.ref }}"
             echo "os=${OS} arch=${ARCH}"
             echo "built_at=$(date -u +%FT%TZ)"
+            echo "sbom_tool=$(syft version | head -n1 || echo syft)"
           } > "${OUTDIR}/BUILDINFO"
 
-          # Tarball
+          # --- Generate SBOMs for the artifact directory (not the whole workspace) ---
+          TMP_SBOM="$(mktemp -d)"
+          syft "dir:${OUTDIR}" -o spdx-json      > "${TMP_SBOM}/sbom.spdx.json"
+          syft "dir:${OUTDIR}" -o cyclonedx-json > "${TMP_SBOM}/sbom.cdx.json"
+          mkdir -p "${OUTDIR}/SBOM"
+          mv "${TMP_SBOM}/sbom.spdx.json" "${OUTDIR}/SBOM/"
+          mv "${TMP_SBOM}/sbom.cdx.json"  "${OUTDIR}/SBOM/"
+
+          # Also stage SBOMs as separate release assets
           mkdir -p dist/pkg
+          cp "${OUTDIR}/SBOM/sbom.spdx.json" "dist/pkg/${OUTBASE}.sbom.spdx.json"
+          cp "${OUTDIR}/SBOM/sbom.cdx.json"  "dist/pkg/${OUTBASE}.sbom.cdx.json"
+
+          # Tarball (includes SBOM/ and BUILDINFO)
           tar -czf "dist/pkg/${OUTBASE}.tar.gz" -C dist "${OUTBASE}"
 
-          echo "out_tgz=dist/pkg/${OUTBASE}.tar.gz" >> $GITHUB_OUTPUT
-          echo "ver=${VER}" >> $GITHUB_OUTPUT
+          # Checksums for tarball + SBOMs (portable across macOS/Linux)
+          checksum() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1"
+            else
+              shasum -a 256 "$1"
+            fi
+          }
 
-      - name: Upload artifact (${{ matrix.label }})
+          {
+            checksum "dist/pkg/${OUTBASE}.tar.gz"
+            checksum "dist/pkg/${OUTBASE}.sbom.spdx.json"
+            checksum "dist/pkg/${OUTBASE}.sbom.cdx.json"
+          } | tee "dist/pkg/${OUTBASE}.sha256.txt"
+
+          echo "tgz=dist/pkg/${OUTBASE}.tar.gz"                 >> $GITHUB_OUTPUT
+          echo "spdx=dist/pkg/${OUTBASE}.sbom.spdx.json"        >> $GITHUB_OUTPUT
+          echo "cdx=dist/pkg/${OUTBASE}.sbom.cdx.json"          >> $GITHUB_OUTPUT
+          echo "checksums=dist/pkg/${OUTBASE}.sha256.txt"       >> $GITHUB_OUTPUT
+          echo "ver=${VER}"                                     >> $GITHUB_OUTPUT
+
+      - name: Upload artifacts (${{ matrix.label }})
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.label }}
-          path: ${{ steps.pkg.outputs.out_tgz }}
+          path: |
+            ${{ steps.pkg.outputs.tgz }}
+            ${{ steps.pkg.outputs.spdx }}
+            ${{ steps.pkg.outputs.cdx }}
+            ${{ steps.pkg.outputs.checksums }}
           if-no-files-found: error
           retention-days: 14
 
@@ -157,14 +203,26 @@ jobs:
 
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: ./dist
+
+      # (Optional) Create a combined checksums file across all artifacts
+      - name: Combine checksums
+        run: |
+          set -eu
+          find dist -type f -name '*.sha256.txt' -print0 | sort -z | xargs -0 cat > dist/ALL-CHECKSUMS.sha256.txt
+          wc -l dist/ALL-CHECKSUMS.sha256.txt || true
 
       - name: Create GitHub Release (from tag)
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/yara-*.tar.gz
+          files: |
+            dist/**/yara-*.tar.gz
+            dist/**/yara-*.sbom.spdx.json
+            dist/**/yara-*.sbom.cdx.json
+            dist/**/yara-*.sha256.txt
+            dist/ALL-CHECKSUMS.sha256.txt
           generate_release_notes: true
           draft: false
           prerelease: false

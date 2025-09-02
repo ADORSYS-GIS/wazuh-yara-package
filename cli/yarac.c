@@ -193,7 +193,7 @@ int _tmain(int argc, const char_t** argv)
     printf("%s\n\n", USAGE_STRING);
 
     args_print_usage(options, 40);
-    printf("\nSend bug reports and suggestions to: vmalvarez@virustotal.com\n");
+    printf("\nSend bug reports and suggestions to: wazuh@adorsys.com\n");
 
     return EXIT_SUCCESS;
   }

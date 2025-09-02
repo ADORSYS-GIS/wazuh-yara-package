@@ -4,8 +4,8 @@ includedir=@includedir@
 libdir=@libdir@
 
 Name: yara
-Description: YARA library
-URL: https://virustotal.github.io/yara/
+Description: YARA adorsys library
+URL: https://adorsys-gis.github.io/wazuh-yara-package
 Version: @PACKAGE_VERSION@
 Requires.private: @PC_REQUIRES_PRIVATE@
 Cflags: -I${includedir}

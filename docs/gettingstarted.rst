@@ -3,7 +3,7 @@ Getting started
 ***************
 
 YARA is a multi-platform program running on Windows, Linux and Mac OS X. You can
-find the latest release at https://github.com/VirusTotal/yara/releases.
+find the latest release at https://github.com/adorsys-gis/wazuh-yara-package/releases.
 
 .. _compiling-yara:
 
@@ -98,7 +98,7 @@ Compiled binaries for Windows in both 32 and 64 bit flavors can be found in the
 link below. Just download the version you want, unzip the archive, and put the
 ``yara.exe`` and ``yarac.exe`` binaries anywhere in your disk.
 
-`Download Windows binaries <https://github.com/VirusTotal/yara/releases/latest>`_
+`Download Windows binaries <https://github.com/adorsys-gis/wazuh-yara-package/releases/latest>`_
 
 To install YARA using `Scoop <https://scoop.sh>`_ or `Chocolatey <https://chocolatey.org>`_, simply type
 ``scoop install yara`` or ``choco install yara``. The integration with both `Scoop` and `Chocolatey` are

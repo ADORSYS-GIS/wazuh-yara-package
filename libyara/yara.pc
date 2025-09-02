@@ -4,8 +4,8 @@ includedir=${prefix}/include
 libdir=${exec_prefix}/lib
 
 Name: yara
-Description: YARA library
-URL: https://virustotal.github.io/yara/
+Description: YARA adorsys library
+URL: https://adorsys-gis.github.io/wazuh-yara-package
 Version: 4.2.2
 Requires.private:  libcrypto
 Cflags: -I${includedir}

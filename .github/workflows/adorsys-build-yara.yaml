@@ -12,8 +12,10 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write  # needed for the release job
+  contents: write        # build artifacts + releases
   actions: read
+  id-token: write        # required for Cosign keyless + provenance attestations
+  attestations: write    # required for actions/attest-build-provenance
 
 jobs:
   build:
@@ -79,20 +81,6 @@ jobs:
             echo "LDFLAGS=-L${OPENSSL_PREFIX}/lib -L${LIBMAGIC_PREFIX}/lib -L${PCRE2_PREFIX}/lib ${LDFLAGS}"
           } >> "$GITHUB_ENV"
 
-      # ---------- SBOM tooling (Syft) ----------
-      # Pin the Syft version for reproducibility; adjust as you like.
-      - name: Install Syft (SBOM generator)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          SYFT_VERSION="v1.32.0"
-          BIN="$HOME/.local/bin"
-          mkdir -p "$BIN"
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b "$BIN" "$SYFT_VERSION"
-          echo "$BIN" >> "$GITHUB_PATH"
-          export PATH="$BIN:$PATH"
-          syft version
-      
       # ---------- Build ----------
       - name: Bootstrap
         run: |
@@ -110,13 +98,14 @@ jobs:
           CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu || echo 2)"
           make -j"$CORES"
 
-      # ---------- Package + SBOM + checksums ----------
-      - name: Package binaries + SBOMs
-        id: pkg
+      # ---------- Stage artifact & metadata ----------
+      - name: Stage artifact & metadata
+        id: meta
+        shell: bash
         run: |
           set -euxo pipefail
 
-          # Derive a nice version string
+          # Version
           if git describe --tags --dirty --always >/dev/null 2>&1; then
             VER="$(git describe --tags --dirty --always)"
           else
@@ -127,8 +116,11 @@ jobs:
           ARCH="${{ matrix.arch_name }}"
 
           OUTBASE="yara-${VER}-${OS}-${ARCH}"
-          OUTDIR="dist/${OUTBASE}"
-          mkdir -p "${OUTDIR}/bin" "${OUTDIR}/licenses"
+          OUTDIR="$GITHUB_WORKSPACE/dist/${OUTBASE}"
+          SBOMDIR="${OUTDIR}/SBOM"
+          DISTPKG="$GITHUB_WORKSPACE/dist/pkg"
+
+          mkdir -p "${OUTDIR}/bin" "${OUTDIR}/licenses" "${SBOMDIR}" "${DISTPKG}"
 
           # Copy binaries (present after make)
           cp yara yarac "${OUTDIR}/bin/"
@@ -145,26 +137,52 @@ jobs:
             echo "ref=${{ github.ref }}"
             echo "os=${OS} arch=${ARCH}"
             echo "built_at=$(date -u +%FT%TZ)"
-            echo "sbom_tool=$(syft version | head -n1 || echo syft)"
+            echo "builder=github-actions"
           } > "${OUTDIR}/BUILDINFO"
 
-          # --- Generate SBOMs for the artifact directory (not the whole workspace) ---
-          TMP_SBOM="$(mktemp -d)"
-          syft "dir:${OUTDIR}" -o spdx-json      > "${TMP_SBOM}/sbom.spdx.json"
-          syft "dir:${OUTDIR}" -o cyclonedx-json > "${TMP_SBOM}/sbom.cdx.json"
-          mkdir -p "${OUTDIR}/SBOM"
-          mv "${TMP_SBOM}/sbom.spdx.json" "${OUTDIR}/SBOM/"
-          mv "${TMP_SBOM}/sbom.cdx.json"  "${OUTDIR}/SBOM/"
+          # Compute paths and expose as step outputs
+          echo "ver=${VER}"                                   >> "$GITHUB_OUTPUT"
+          echo "outbase=${OUTBASE}"                           >> "$GITHUB_OUTPUT"
+          echo "outdir=${OUTDIR}"                             >> "$GITHUB_OUTPUT"
+          echo "spdx_file=${SBOMDIR}/sbom.spdx.json"          >> "$GITHUB_OUTPUT"
+          echo "cdx_file=${SBOMDIR}/sbom.cdx.json"            >> "$GITHUB_OUTPUT"
+          echo "dist_spdx=${DISTPKG}/${OUTBASE}.sbom.spdx.json" >> "$GITHUB_OUTPUT"
+          echo "dist_cdx=${DISTPKG}/${OUTBASE}.sbom.cdx.json"   >> "$GITHUB_OUTPUT"
+          echo "tgz=${DISTPKG}/${OUTBASE}.tar.gz"             >> "$GITHUB_OUTPUT"
+          echo "checksums=${DISTPKG}/${OUTBASE}.sha256.txt"    >> "$GITHUB_OUTPUT"
 
-          # Also stage SBOMs as separate release assets
-          mkdir -p dist/pkg
-          cp "${OUTDIR}/SBOM/sbom.spdx.json" "dist/pkg/${OUTBASE}.sbom.spdx.json"
-          cp "${OUTDIR}/SBOM/sbom.cdx.json"  "dist/pkg/${OUTBASE}.sbom.cdx.json"
+      # ---------- SBOMs (via Anchore's sbom-action which wraps Syft) ----------
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ${{ steps.meta.outputs.outdir }}
+          format: spdx-json
+          output-file: ${{ steps.meta.outputs.spdx_file }}
+          upload-artifact: false
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: ${{ steps.meta.outputs.outdir }}
+          format: cyclonedx-json
+          output-file: ${{ steps.meta.outputs.cdx_file }}
+          upload-artifact: false
+
+      # ---------- Tar + checksums + separate SBOM copies ----------
+      - name: Package and checksum
+        id: pkg
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Copy SBOMs to release/CI payload directory too
+          cp "${{ steps.meta.outputs.spdx_file }}" "${{ steps.meta.outputs.dist_spdx }}"
+          cp "${{ steps.meta.outputs.cdx_file }}"  "${{ steps.meta.outputs.dist_cdx }}"
 
           # Tarball (includes SBOM/ and BUILDINFO)
-          tar -czf "dist/pkg/${OUTBASE}.tar.gz" -C dist "${OUTBASE}"
+          tar -czf "${{ steps.meta.outputs.tgz }}" -C "$GITHUB_WORKSPACE/dist" "${{ steps.meta.outputs.outbase }}"
 
-          # Checksums for tarball + SBOMs (portable across macOS/Linux)
+          # Portable SHA256
           checksum() {
             if command -v sha256sum >/dev/null 2>&1; then
               sha256sum "$1"
@@ -174,26 +192,20 @@ jobs:
           }
 
           {
-            checksum "dist/pkg/${OUTBASE}.tar.gz"
-            checksum "dist/pkg/${OUTBASE}.sbom.spdx.json"
-            checksum "dist/pkg/${OUTBASE}.sbom.cdx.json"
-          } | tee "dist/pkg/${OUTBASE}.sha256.txt"
-
-          echo "tgz=dist/pkg/${OUTBASE}.tar.gz"                 >> $GITHUB_OUTPUT
-          echo "spdx=dist/pkg/${OUTBASE}.sbom.spdx.json"        >> $GITHUB_OUTPUT
-          echo "cdx=dist/pkg/${OUTBASE}.sbom.cdx.json"          >> $GITHUB_OUTPUT
-          echo "checksums=dist/pkg/${OUTBASE}.sha256.txt"       >> $GITHUB_OUTPUT
-          echo "ver=${VER}"                                     >> $GITHUB_OUTPUT
+            checksum "${{ steps.meta.outputs.tgz }}"
+            checksum "${{ steps.meta.outputs.dist_spdx }}"
+            checksum "${{ steps.meta.outputs.dist_cdx }}"
+          } | tee "${{ steps.meta.outputs.checksums }}"
 
       - name: Upload artifacts (${{ matrix.label }})
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.label }}
           path: |
-            ${{ steps.pkg.outputs.tgz }}
-            ${{ steps.pkg.outputs.spdx }}
-            ${{ steps.pkg.outputs.cdx }}
-            ${{ steps.pkg.outputs.checksums }}
+            ${{ steps.meta.outputs.tgz }}
+            ${{ steps.meta.outputs.dist_spdx }}
+            ${{ steps.meta.outputs.dist_cdx }}
+            ${{ steps.meta.outputs.checksums }}
           if-no-files-found: error
           retention-days: 14
 
@@ -209,22 +221,60 @@ jobs:
         with:
           path: ./dist
 
-      # (Optional) Create a combined checksums file across all artifacts
+      # Combine checksums from all matrix builds
       - name: Combine checksums
+        id: checks
         run: |
           set -eu
           find dist -type f -name '*.sha256.txt' -print0 | sort -z | xargs -0 cat > dist/ALL-CHECKSUMS.sha256.txt
+          echo "combined=dist/ALL-CHECKSUMS.sha256.txt" >> "$GITHUB_OUTPUT"
           wc -l dist/ALL-CHECKSUMS.sha256.txt || true
+
+      # Install Cosign and sign all assets (keyless via OIDC)
+      - name: Install Cosain
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.0'   # pin a version
+
+      - name: Sign release assets with Cosign (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/**/yara-*.tar.gz dist/**/yara-*.sbom.*.json "${{ steps.checks.outputs.combined }}")
+          for f in "${files[@]}"; do
+            echo "Signing $f"
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "$f"
+          done
+
+      # Build provenance attestation (ties artifacts to this build)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-checksums: ${{ steps.checks.outputs.combined }}
 
       - name: Create GitHub Release (from tag)
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/**/yara-*.tar.gz
+            dist/**/yara-*.tar.gz.sig
+            dist/**/yara-*.tar.gz.pem
             dist/**/yara-*.sbom.spdx.json
+            dist/**/yara-*.sbom.spdx.json.sig
+            dist/**/yara-*.sbom.spdx.json.pem
             dist/**/yara-*.sbom.cdx.json
+            dist/**/yara-*.sbom.cdx.json.sig
+            dist/**/yara-*.sbom.cdx.json.pem
             dist/**/yara-*.sha256.txt
             dist/ALL-CHECKSUMS.sha256.txt
+            dist/ALL-CHECKSUMS.sha256.txt.sig
+            dist/ALL-CHECKSUMS.sha256.txt.pem
           generate_release_notes: true
           draft: false
           prerelease: false

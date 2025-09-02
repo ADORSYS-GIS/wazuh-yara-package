@@ -45,7 +45,7 @@ jobs:
     runs-on: ${{ matrix.runs-on }}
 
     steps:
-      - name: Checkout (your fork)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0       # so `git describe` and tag info is available
@@ -105,9 +105,9 @@ jobs:
 
           # Derive a nice version string
           if git describe --tags --dirty --always >/dev/null 2>&1; then
-            VER="$(git describe --tags --dirty --always)"
+            VER="$(git describe --tags --dirty --always)-adorsys"
           else
-            VER="${GITHUB_REF_NAME:-dev}"
+            VER="${GITHUB_REF_NAME:-dev}-adorsys"
           fi
 
           OS="${{ matrix.os_name }}"

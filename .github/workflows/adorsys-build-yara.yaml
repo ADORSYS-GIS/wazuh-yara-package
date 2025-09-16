@@ -46,7 +46,7 @@ jobs:
 
           # Ubuntu 22.04
           - label: ubuntu22-amd64
-            os_name: ubuntu
+            os_name: ubuntu22
             arch_name: x86_64
             runs-on: ubuntu-22.04
 
